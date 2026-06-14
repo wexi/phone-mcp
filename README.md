@@ -114,6 +114,23 @@ snapshot is also a read-only resource, `pixel://status`.
 the picture rather than only a file path. Every call rides the always-warm
 daemon link.
 
+## Permissions
+
+A few plugins need Android permissions before their tools work: Notification
+sync (`kde_notifications` + the media tools), Camera (`kde_photo`), Receive
+remote keypresses (`kde_send_text`), and the SMS grants. Grant them by hand in
+the KDE Connect app (tap the desktop → "Some Plugins need permissions"), **or**
+run the optional one-time adb bootstrap:
+
+```bash
+scripts/setup-permissions.sh          # needs adb + a reachable device
+ADB_SERIAL=<serial> scripts/setup-permissions.sh   # pick one of several devices
+```
+
+It's idempotent and non-destructive (it won't change your active keyboard). adb
+is bootstrap-only here — the MCP transport stays KDE Connect. SMS, ping, ring,
+share, SFTP pull/photos, and status/battery need no extra grants.
+
 ## Gotchas
 
 - **KDE Connect must be open on the phone, on the home Wi-Fi, and paired** with
