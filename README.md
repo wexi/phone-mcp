@@ -106,9 +106,14 @@ claude mcp add pixel --scope user --env KDECONNECT_NAME="My Phone" \
 ```
 
 Tools: `kde_status`, `kde_pull`, `kde_photos`, `kde_photo`, `kde_notifications`,
-`kde_send_sms`, `kde_send_text`, `kde_share`, `kde_clipboard`, `kde_now_playing`,
-`kde_media_control`, `kde_media_players`, `kde_ping`, `kde_ring`. The device
-snapshot is also a read-only resource, `pixel://status`.
+`kde_send_sms`, `kde_send_text`, `kde_share`, `kde_clipboard`, `kde_ls`,
+`kde_get`, `kde_put`, `kde_rm`, `kde_now_playing`, `kde_media_control`,
+`kde_media_players`, `kde_ping`, `kde_ring`. The device snapshot is also a
+read-only resource, `pixel://status`.
+
+`kde_ls` / `kde_get` / `kde_put` / `kde_rm` are general file transfer over the
+SFTP mount — list any directory, pull/push any file by path (relative to the
+phone's internal storage), and delete. `kde_rm` is irreversible (no trash).
 
 `kde_photo` returns the captured photo as an MCP **image**, so the model sees
 the picture rather than only a file path. Every call rides the always-warm

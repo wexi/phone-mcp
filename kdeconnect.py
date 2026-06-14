@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Drive a paired Pixel over KDE Connect: library + CLI.
 
-This is the *stable* transport. Where pixel.py (adb) is stateless and pays a
-rediscover/reconnect tax on every call over Wireless debugging's dynamic port,
-KDE Connect keeps a persistent, cert-pinned TLS link warm in its own daemon
-(kdeconnectd) and heals drops in the background. Pair once on the phone and the
-link survives reboots; each request here is a fast local call into the daemon.
+KDE Connect is the *sole* transport. It keeps a persistent, cert-pinned TLS link
+warm in its own daemon (kdeconnectd) and heals drops in the background: pair once
+on the phone and the link survives reboots; each request here is a fast local
+call into the daemon — no rediscovery, no Wireless-debugging port churn.
 
-It does NOT replace adb — KDE Connect cannot screencap the display or run a
-shell. The two are complementary: KDE Connect for camera capture, input,
-notifications, file transfer, battery/connectivity, ring/find; adb (pixel.py)
-for screenshot + raw shell. pixel_mcp.py exposes both.
+adb is NOT used at runtime and pixel_mcp.py exposes nothing through it. adb's
+only sanctioned role is the optional one-time permission bootstrap
+(scripts/setup-permissions.sh) that sets KDE Connect up on the phone; after that
+it steps back. KDE Connect can't screencap the phone's own display or run a raw
+shell — those tricks were the only thing adb offered and they aren't what this
+is for. Everything here goes through the daemon: camera capture, input,
+notifications, SMS, file transfer (list/get/put/rm), battery/connectivity,
+ring/find.
 
 Backends:
     kdeconnect-cli   actions (ping, ring, share, photo, send-keys, sms, ...)
@@ -44,6 +47,7 @@ DEV_IFACE = "org.kde.kdeconnect.device"
 MPRIS_IFACE = "org.kde.kdeconnect.device.mprisremote"
 SFTP_IFACE = "org.kde.kdeconnect.device.sftp"
 CAMERA_SUBPATH = "storage/emulated/0/DCIM/Camera"  # under the SFTP mountpoint
+PRIMARY_SUBPATH = "storage/emulated/0"  # phone internal storage, under the mount
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".heic", ".mp4")
 MEDIA_ACTIONS = {  # accepted (lowercased) -> KDE Connect MPRIS action
     "play": "Play", "pause": "Pause", "playpause": "PlayPause",
@@ -349,6 +353,82 @@ class KDEConnect:
         shutil.copy2(src, local)
         return local
 
+    # --- general file transfer (sftp mount) -------------------------------
+    # The sftp plugin FUSE-mounts the whole phone storage read-write, so these
+    # are plain filesystem ops. Remote paths are relative to internal storage
+    # (e.g. "Download/report.pdf", "DCIM/Camera/x.jpg"); a leading "/" is fine.
+
+    def _remote(self, path):
+        """Resolve a phone-relative path under the mount, contained to it."""
+        root = Path(self.mount())
+        target = (root / PRIMARY_SUBPATH / str(path).lstrip("/")).resolve()
+        if target != root and not target.is_relative_to(root):
+            raise KDEConnectError(f"path escapes phone storage: {path}")
+        return target
+
+    def ls(self, remote_path="", n=200):
+        """List a directory on the phone (relative to internal storage)."""
+        d = self._remote(remote_path)
+        if not d.exists():
+            raise KDEConnectError(f"not found on phone: {remote_path or '/'}")
+        if not d.is_dir():
+            raise KDEConnectError(f"not a directory: {remote_path}")
+        out = []
+        for p in sorted(d.iterdir(), key=lambda q: (not q.is_dir(), q.name.lower())):
+            try:
+                st = p.stat()
+                out.append({
+                    "name": p.name, "dir": p.is_dir(), "size": st.st_size,
+                    "mtime": int(st.st_mtime),
+                    "modified": time.strftime("%Y-%m-%d %H:%M:%S",
+                                              time.localtime(st.st_mtime)),
+                })
+            except OSError:
+                out.append({"name": p.name, "dir": None, "size": None})
+            if len(out) >= n:
+                break
+        return out
+
+    def get(self, remote_path, dest_dir=None):
+        """Pull any file off the phone by path to the host. Returns the Path."""
+        src = self._remote(remote_path)
+        if not src.exists():
+            raise KDEConnectError(f"not found on phone: {remote_path}")
+        if src.is_dir():
+            raise KDEConnectError(f"is a directory, not a file: {remote_path}")
+        dest_dir = Path(dest_dir) if dest_dir else PULL_DIR
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        local = dest_dir / src.name
+        shutil.copy2(src, local)
+        return local
+
+    def put(self, local_path, remote_path):
+        """Push a local file to a path on the phone. If remote_path is an
+        existing directory, the file lands inside it. Returns the phone Path."""
+        local = Path(local_path).expanduser()
+        if not local.is_file():
+            raise KDEConnectError(f"local file not found: {local_path}")
+        dst = self._remote(remote_path)
+        if dst.is_dir():
+            dst = dst / local.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(local, dst)
+        except OSError:
+            shutil.copyfile(local, dst)  # sftp may reject metadata copy
+        return dst
+
+    def rm(self, remote_path):
+        """Delete a file (or empty directory) on the phone. Irreversible."""
+        target = self._remote(remote_path)
+        if not target.exists():
+            raise KDEConnectError(f"not found on phone: {remote_path}")
+        if target.is_dir():
+            target.rmdir()  # empty dirs only; refuses non-empty
+        else:
+            target.unlink()
+        return f"deleted {remote_path}"
+
     def send_text(self, text):
         """Type text into the phone's focused field (remote keyboard)."""
         self._cli(["--send-keys", text])
@@ -434,6 +514,19 @@ def main():
     sh = sub.add_parser("share", help="push a file/URL to the phone")
     sh.add_argument("path_or_url")
 
+    ls = sub.add_parser("ls", help="list a phone directory (over SFTP)")
+    ls.add_argument("path", nargs="?", default="", help="phone path; default = storage root")
+
+    gt = sub.add_parser("get", help="pull any file off the phone by path")
+    gt.add_argument("path", help="phone path, e.g. Download/x.pdf")
+
+    pt = sub.add_parser("put", help="push a local file to a phone path")
+    pt.add_argument("local")
+    pt.add_argument("remote", help="phone path or directory")
+
+    rm = sub.add_parser("rm", help="delete a file (or empty dir) on the phone")
+    rm.add_argument("path", help="phone path")
+
     sm = sub.add_parser("sms", help="send an SMS")
     sm.add_argument("message")
     sm.add_argument("destination")
@@ -472,6 +565,14 @@ def main():
             print(kc.send_text(a.text))
         elif a.cmd == "share":
             print(kc.share(a.path_or_url))
+        elif a.cmd == "ls":
+            print(json.dumps(kc.ls(a.path), indent=2))
+        elif a.cmd == "get":
+            print(kc.get(a.path))
+        elif a.cmd == "put":
+            print(kc.put(a.local, a.remote))
+        elif a.cmd == "rm":
+            print(kc.rm(a.path))
         elif a.cmd == "sms":
             print(kc.send_sms(a.message, a.destination))
     except KDEConnectError as e:

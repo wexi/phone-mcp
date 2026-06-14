@@ -9,8 +9,8 @@ really an app-dev tool, and its only unique tricks — screencap and raw shell �
 aren't what this is for.)
 
 Capabilities map to senses: EYES (camera capture), EARS (notifications),
-VOICE/HANDS (SMS, remote typing, file push), plus battery/connectivity, ping,
-and ring.
+VOICE/HANDS (SMS, remote typing, file push), file transfer over SFTP
+(list/get/put/rm any path), plus battery/connectivity, ping, and ring.
 
 Run (stdio, for Claude Desktop / Claude Code):
     python3 pixel_mcp.py
@@ -119,6 +119,42 @@ def kde_share(path_or_url: str) -> str:
 def kde_clipboard() -> str:
     """Send the desktop clipboard to the phone's clipboard."""
     return _kc().send_clipboard()
+
+
+@mcp.tool()
+def kde_ls(remote_path: str = "") -> list[dict]:
+    """List a directory on the phone over SFTP. `remote_path` is relative to
+    internal storage (e.g. "Download", "DCIM/Camera"); default = storage root.
+    Each entry: name, dir?, size, modified.
+    """
+    return _kc().ls(remote_path)
+
+
+@mcp.tool()
+def kde_get(remote_path: str) -> dict:
+    """Pull ANY file off the phone by path (relative to internal storage, e.g.
+    "Download/report.pdf") to the host (~/Pictures/pixel). Generalizes kde_pull
+    beyond the camera roll. Returns the saved host path; Read it to view.
+    """
+    local = _kc().get(remote_path)
+    return {"saved_to": str(local), "name": local.name}
+
+
+@mcp.tool()
+def kde_put(local_path: str, remote_path: str) -> str:
+    """Push a local file to a path on the phone (relative to internal storage).
+    If `remote_path` is an existing directory, the file lands inside it; parent
+    dirs are created as needed.
+    """
+    return str(_kc().put(local_path, remote_path))
+
+
+@mcp.tool()
+def kde_rm(remote_path: str) -> str:
+    """Delete a file (or empty directory) on the phone by path (relative to
+    internal storage). Irreversible — there is no trash.
+    """
+    return _kc().rm(remote_path)
 
 
 @mcp.tool()
