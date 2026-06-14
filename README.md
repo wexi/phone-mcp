@@ -5,6 +5,12 @@ Give an AI assistant senses on your **phone** over **KDE Connect** — eyes
 push, media control) — for hands-off bench work and remote control. Works with
 any KDE Connect-paired device (developed and tested against a Pixel 9 Pro).
 
+![demo](demo.gif)
+
+*Above: real `kdeconnect.py` runs — status, a ping, and pulling the newest
+camera photo (an oscilloscope on the bench) to the host, all over the stable
+KDE Connect link with no adb and no cable.*
+
 KDE Connect is the whole transport: a persistent, cert-pinned link held warm by
 the `kdeconnectd` daemon. Pair once on the phone and it survives drops and
 reboots; each call is a fast local hop into the daemon — no rediscovery, no
@@ -42,7 +48,9 @@ paths are environment-overridable: `KDECONNECT_NAME` (pin a device by name),
 | `status` | device snapshot — paired?, reachable?, battery, connectivity |
 | `devices` | list paired/reachable KDE Connect devices |
 | `pair` | request pairing (Accept on the phone) |
-| `photo` | open the phone camera, wait for a shot, transfer it to the host |
+| `pull` | pull newest (or named) camera photo to the host (over SFTP) |
+| `photos` | list newest camera files (name, size, mtime) |
+| `photo` | open the phone camera, wait for a shot, transfer it (needs camera permission) |
 | `notifications` | list the phone's active notifications |
 | `sms` | send an SMS (`message destination`) |
 | `type` | type text into the phone's focused field (remote keyboard) |
@@ -56,13 +64,20 @@ paths are environment-overridable: `KDECONNECT_NAME` (pin a device by name),
 
 ```bash
 python3 kdeconnect.py status
-python3 kdeconnect.py photo                  # open camera -> ~/Pictures/pixel
+python3 kdeconnect.py pull                    # newest camera photo -> ~/Pictures/pixel
+python3 kdeconnect.py photos -n 5
 python3 kdeconnect.py notifications
 python3 kdeconnect.py sms "on my way" +15551234567
 python3 kdeconnect.py type "hello from the desktop"
 python3 kdeconnect.py share ~/Pictures/x.png
 python3 kdeconnect.py ring
 ```
+
+**Two ways to get "eyes":** `pull` grabs a photo you *already* shot (reads the
+phone's camera folder over the SFTP plugin — the reliable everyday path, "took
+a snap → look at it"). `photo` triggers a *fresh* on-demand capture by opening
+the camera remotely; it needs the KDE Connect app to have Android **camera
+permission** granted.
 
 As a library:
 
@@ -90,8 +105,8 @@ claude mcp add pixel --scope user --env KDECONNECT_NAME="My Phone" \
   -- python3 /path/to/phone-mcp/pixel_mcp.py
 ```
 
-Tools: `kde_status`, `kde_photo`, `kde_notifications`, `kde_send_sms`,
-`kde_send_text`, `kde_share`, `kde_clipboard`, `kde_now_playing`,
+Tools: `kde_status`, `kde_pull`, `kde_photos`, `kde_photo`, `kde_notifications`,
+`kde_send_sms`, `kde_send_text`, `kde_share`, `kde_clipboard`, `kde_now_playing`,
 `kde_media_control`, `kde_media_players`, `kde_ping`, `kde_ring`. The device
 snapshot is also a read-only resource, `pixel://status`.
 

@@ -66,6 +66,26 @@ def kde_photo(timeout: int = 180) -> list:
 
 
 @mcp.tool()
+def kde_photos(n: int = 10) -> list[dict]:
+    """Newest-first list of camera photos on the phone (name, size, modified),
+    read over the SFTP link. Use to pick a file for kde_pull, or to see what
+    the user just shot.
+    """
+    return _kc().list_photos(n=n)
+
+
+@mcp.tool(structured_output=False)  # returns [dict, Image]
+def kde_pull(name: str | None = None) -> list:
+    """EYES: pull a photo the user already shot to the host (~/Pictures/pixel)
+    and return it as an image to view directly. No name = the newest photo —
+    the common "took a snap" case. This is the reliable camera path (over SFTP);
+    kde_photo (live capture) needs the phone's camera permission granted.
+    """
+    local = _kc().pull(name)
+    return [{"saved_to": str(local), "name": local.name}, Image(path=str(local))]
+
+
+@mcp.tool()
 def kde_notifications() -> str:
     """EARS: list the phone's active notifications (texts, app alerts, alarms)
     as text. Use to see what just arrived on the phone.

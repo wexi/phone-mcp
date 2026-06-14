@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -41,6 +42,9 @@ PULL_DIR = Path(os.environ.get("PIXEL_PULL_DIR",
 DEST = "org.kde.kdeconnect"
 DEV_IFACE = "org.kde.kdeconnect.device"
 MPRIS_IFACE = "org.kde.kdeconnect.device.mprisremote"
+SFTP_IFACE = "org.kde.kdeconnect.device.sftp"
+CAMERA_SUBPATH = "storage/emulated/0/DCIM/Camera"  # under the SFTP mountpoint
+PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".heic", ".mp4")
 MEDIA_ACTIONS = {  # accepted (lowercased) -> KDE Connect MPRIS action
     "play": "Play", "pause": "Pause", "playpause": "PlayPause",
     "toggle": "PlayPause", "next": "Next", "previous": "Previous",
@@ -127,9 +131,14 @@ class KDEConnect:
         return f"/modules/kdeconnect/devices/{self.dev()}{sub}"
 
     def _coerce(self, raw):
-        """Turn a gdbus reply `(<value>,)` into a Python value."""
-        m = re.match(r"^\(<(.*)>,?\)\s*$", raw.strip(), re.DOTALL)
-        return self._gv(m.group(1).strip() if m else raw.strip())
+        """Turn a gdbus reply into a Python value. Handles both a property
+        Get (variant: `(<value>,)`) and a plain method return (`(value,)`)."""
+        s = raw.strip()
+        if s.startswith("(") and s.endswith(")"):
+            s = s[1:-1].rstrip(",").strip()
+        if s.startswith("<") and s.endswith(">"):
+            s = s[1:-1].strip()
+        return self._gv(s)
 
     def _gv(self, v):
         """Parse a single GVariant text value (scalar or string array)."""
@@ -266,16 +275,79 @@ class KDEConnect:
         """Open the phone camera, wait for a capture, transfer it to the host.
 
         This is the on-demand "take a snap now" move: the camera app opens on
-        the phone, the user shoots, and the image lands at ``dest``. Blocks
-        until the photo is taken (or ``timeout``). Returns the local Path."""
+        the phone, the user shoots, and the image lands at ``dest``. Returns
+        the local Path.
+
+        `kdeconnect-cli --photo` returns as soon as the camera *opens*; the
+        daemon writes the file asynchronously once the shot is taken. So we
+        kick off the request, then poll for the file up to ``timeout``."""
         dest = Path(dest) if dest else (
             PULL_DIR / f"kde_photo_{int(time.time())}.jpg")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        self._cli(["--photo", str(dest)], timeout=timeout)
-        if not dest.exists():
+        if dest.exists():
+            dest.unlink()  # avoid a stale file reading as success
+        self._cli(["--photo", str(dest)], timeout=30)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if dest.exists() and dest.stat().st_size > 0:
+                return dest
+            time.sleep(0.5)
+        raise KDEConnectError(
+            f"camera opened but no photo arrived within {timeout}s — take the "
+            "shot when the camera appears on the phone")
+
+    # --- pull existing photos (sftp plugin) -------------------------------
+
+    def _sftp(self, method):
+        return self._coerce(self._gdbus(f"{SFTP_IFACE}.{method}", sub="/sftp"))
+
+    def mount(self):
+        """Mount the phone storage over SFTP; return the local mountpoint."""
+        if not self._sftp("mountAndWait"):
             raise KDEConnectError(
-                "camera opened but no photo was transferred (cancelled?)")
-        return dest
+                "sftp mount failed: " + (self._sftp("getMountError") or
+                "grant KDE Connect storage access on the phone"))
+        return self._sftp("mountPoint")
+
+    def camera_dir(self):
+        return Path(self.mount()) / CAMERA_SUBPATH
+
+    def list_photos(self, n=10):
+        """Newest-first camera files on the phone (name, size, mtime)."""
+        cam = self.camera_dir()
+        try:
+            files = [p for p in cam.iterdir()
+                     if p.suffix.lower() in PHOTO_EXTS]
+        except OSError as e:
+            raise KDEConnectError(f"cannot read {cam}: {e}")
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        out = []
+        for p in files[:n]:
+            st = p.stat()
+            out.append({
+                "name": p.name, "size": st.st_size, "mtime": int(st.st_mtime),
+                "modified": time.strftime("%Y-%m-%d %H:%M:%S",
+                                          time.localtime(st.st_mtime)),
+            })
+        return out
+
+    def pull(self, name=None, dest_dir=None):
+        """Pull a camera file (default: the newest) to the host. The "took a
+        snap -> look at it" move, over the stable SFTP link. Returns the Path."""
+        cam = self.camera_dir()
+        if name is None:
+            photos = self.list_photos(n=1)
+            if not photos:
+                raise KDEConnectError("no photos in the phone's camera folder")
+            name = photos[0]["name"]
+        src = cam / name
+        if not src.exists():
+            raise KDEConnectError(f"{name} not found in the phone camera folder")
+        dest_dir = Path(dest_dir) if dest_dir else PULL_DIR
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        local = dest_dir / name
+        shutil.copy2(src, local)
+        return local
 
     def send_text(self, text):
         """Type text into the phone's focused field (remote keyboard)."""
@@ -350,6 +422,12 @@ def main():
     ph = sub.add_parser("photo", help="open camera, capture, transfer to host")
     ph.add_argument("dest", nargs="?", help="output path; default ~/Pictures/pixel")
 
+    pf = sub.add_parser("photos", help="list newest camera files (over SFTP)")
+    pf.add_argument("-n", type=int, default=10)
+
+    pl = sub.add_parser("pull", help="pull newest (or named) camera photo to the host")
+    pl.add_argument("name", nargs="?", help="file name; default = newest")
+
     tx = sub.add_parser("type", help="type text on the phone (remote keyboard)")
     tx.add_argument("text")
 
@@ -382,6 +460,10 @@ def main():
             print(json.dumps(kc.media_players(), indent=2))
         elif a.cmd == "media":
             print(kc.media_control(a.action, a.player))
+        elif a.cmd == "photos":
+            print(json.dumps(kc.list_photos(n=a.n), indent=2))
+        elif a.cmd == "pull":
+            print(kc.pull(a.name))
         elif a.cmd == "ping":
             print(kc.ping(a.message))
         elif a.cmd == "photo":
